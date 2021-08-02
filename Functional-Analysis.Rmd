@@ -1,0 +1,241 @@
+---
+title: "functional-analysis course homework"
+author: "Wojciech Dudzik"
+date: "31/07/2021"
+output: html_document
+fig_align: "center"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Install all libraries
+
+In case of working on fresh enviroment we can quickly install all the necessary libraries from main CRAN repository.
+
+```{r message=FALSE, warning=FALSE}
+#install.packages("tidyverse")
+#install.packages("ggplot2")
+#install.packages("cowplot")
+#install.packages("colorDF")
+#install.packages("tmod")
+#install.packages("colorDF")
+#install.packages("broom")
+#install.packages("BiocManager")
+#BiocManager::install("DESeq2")
+#BiocManager::install("msigdbr")
+```
+
+
+# Load libraries
+
+```{r message=FALSE, warning=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(cowplot)
+library(tmod)
+library(colorDF)
+library(DESeq2)
+library(msigdbr)
+```
+
+# Load data
+
+Data provided from https://january3.github.io/FunctionalTranscriptomics/Workshops/workshop_2_1/weiner_functional_transcriptomics_workshop_2_1.html#Homework and is copied to github repository that provides this analysis
+
+```{r}
+counts <- readRDS("data/counts.rds")
+covar  <- readRDS("data/covar.rds")
+annot  <- readRDS("data/annot.rds")
+```
+
+
+# Build differential gene expression 
+
+```{r}
+ds2 <- DESeqDataSetFromMatrix(countData=counts, 
+                              colData=covar,
+                              design= ~ group)
+ds2 <- DESeq(ds2)
+```
+
+
+# Comparison
+
+In the data we have 3 "classes" - other, no, SC2. We get the coefficients of the one-vs-one-models which show us the differences between healthy examples and specific diseases. We do that so we can compare the change between diseses and healthy baseline. We plot it the logarithm of fold change ratio to check which genes are concodant (located in quarter 1 or 3) and which tends to be discordant (quarter 2 and 4)
+
+
+```{r}
+res_other <- results(ds2, name="group_other_vs_no")
+res_other <- as.data.frame(res_other)
+res_SC2   <- results(ds2, name="group_SC2_vs_no")
+res_SC2 <- as.data.frame(res_SC2)
+res_merged <- merge(res_other, res_SC2, by=0, 
+                    suffixes = c(".other", ".SC2"))
+ggplot(res_merged, aes(x=log2FoldChange.other, y=log2FoldChange.SC2)) +
+  geom_point() + geom_hline(yintercept=0) + geom_vline(xintercept=0)
+```
+We may also see how closely the shift from a healthy state is connected. The problem is that this test in most cases will be statistically significant which in turns make using correlation a less useful.  Correlation closer to 1 indicates more concordant genes, whereas closer to -1 indicates more discordant genes.
+
+```{r}
+cor.test(res_merged$log2FoldChange.other, res_merged$log2FoldChange.SC2)
+```
+
+
+
+# Merge result of both comparisons
+
+Below we merge results of both groups (other and SC2) into single data frame using its PrimaryID. Results are ordered by ajdusted p-values.
+
+```{r}
+res_other <- merge(annot, res_other, by.x="PrimaryID", by.y=0)
+res_other <- res_other %>% arrange(padj)
+res_SC2 <- merge(annot, res_SC2, by.x="PrimaryID", by.y=0)
+res_SC2 <- res_SC2 %>% arrange(padj)
+```
+
+# Plotting sample gene
+
+Below are plots for 3 most significant gene for SARS-CoV-2 (based on information merged and ordered previously):
+
+```{r}
+norm_counts <- assay(vst(ds2))
+```
+
+```{r}
+plot_gene <- function(id, expr, covariate) {
+  df <- data.frame(Expression=expr[id, ], Covariate=covariate)
+  ggplot(df, aes(x=Covariate, y=Expression)) + 
+    geom_boxplot() +
+    geom_jitter(width = .2)
+}
+plot_gene("ENSG00000126709", norm_counts, covar$group)
+plot_gene("ENSG00000185745", norm_counts, covar$group)
+plot_gene("ENSG00000137959", norm_counts, covar$group)
+```
+Below are plots for 3 most significant gene for other group:
+
+```{r}
+plot_gene("ENSG00000134321", norm_counts, covar$group)
+plot_gene("ENSG00000111335", norm_counts, covar$group)
+plot_gene("ENSG00000185745", norm_counts, covar$group)
+```
+# Gene set enrichment
+
+These are tests that look for differentially expressed gene sets in databases that are already available.
+
+## Hypergeometric test and CERNO
+
+To assess a gene's utility for a gene set in diagnosing an illness, we need an arbitrarily determined significance threshold of 0.001 and at least a twofold change in gene expression.
+
+```{r}
+## Hypergeometric test
+## define the "foreground" set
+pval_thr <- 1e-3 # define the p value threshold
+lfc_thr  <- 1    # define the LFC threshold
+sel <- abs(res_other$log2FoldChange) > lfc_thr &
+       res_other$padj < pval_thr
+fg <- res_other$SYMBOL[sel]
+bg <- res_other$SYMBOL
+hg_res_other <- tmodHGtest(fg=fg, bg=bg)
+## CERNO
+gg <- res_other$SYMBOL[ order(res_other$pvalue) ]
+ce_res_other <- tmodCERNOtest(gg)
+```
+
+We need to use p-value instead of adjusted p-value because adjusted p-value is monotonic on p-value and will not affect the order.The adjusted p-value has a lower resolution (2 different p-values may have the same adjusted p-value due to numerical issues).
+
+
+```{r}
+## Hypergeometric test
+sel <- abs(res_SC2$log2FoldChange) > lfc_thr &
+       res_SC2$padj < pval_thr
+fg <- res_SC2$SYMBOL[sel]
+bg <- res_SC2$SYMBOL
+hg_res_SC2 <- tmodHGtest(fg=fg, bg=bg)
+## CERNO
+gg <- res_SC2$SYMBOL[ order(res_SC2$pvalue) ]
+ce_res_SC2 <- tmodCERNOtest(gg)
+```
+
+Now we compare the differences between enrichment for "other" disease and SARS-CoV-2. The plot below shows just the order of magnitude of the change.
+
+```{r, fig.height = 12, fig.width = 10}
+res <- list(other=ce_res_other, SC2=ce_res_SC2)
+tmodPanelPlot(res, filter.rows.pval = 1e-3)
+```
+
+We have all genes together before the enrichment. To find the differentially expressed ones, we need to check if  there is concordance or discordance between groups:
+
+```{r, fig.height = 11, fig.width = 9}
+res_merged <- merge(res_other, res_SC2, 
+  by=c("PrimaryID", "ENSEMBL", "SYMBOL") , suffixes=c(".other", ".SC2"))
+lfcs <- res_merged[ , c("log2FoldChange.other", "log2FoldChange.SC2") ]
+pvals <- res_merged[ , c("padj.other", "padj.SC2") ]
+pie <- tmodDecideTests(res_merged$SYMBOL, lfc = lfcs, pval=pvals)
+names(pie) <- names(res)
+tmodPanelPlot(res, filter.rows.pval = 1e-3, pie=pie, grid="b")
+```
+
+The color blue denotes a decrease in gene expression, whereas the color red denotes an increase.
+
+## Evidence for a gene set difference?
+
+Then, to see if a certain gene set is legitimate in being called differentiating, we may look at the effect magnitude associated with that gene set. It is the same as the p-values-ordered area under the receiver operating curve (ROC) of a gene collection. AUC approaches 1 when a dense collection of genes with strong differentiation potential exists.
+
+
+Below we inspect effect size of the group with ID `LI.M127` (type I interferon response) for SARS-CoV-2 vs no disease:
+
+```{r}
+gg <- res_SC2$SYMBOL[ order(res_SC2$pvalue) ]
+evidencePlot(gg, m="LI.M127", gene.labels=TRUE)
+```
+
+From the previous plot we could already see that the AUC will be high (much closer to 1). On the contrary, group with ID `LI.S11` (Activated (LPS) dendritic cell surface signature) has AUC much lower AUC (something close to 0.6).
+
+```{r}
+gg <- res_SC2$SYMBOL[ order(res_SC2$pvalue) ]
+evidencePlot(gg, m="LI.S11", gene.labels=TRUE)
+```
+
+## Gene set
+
+Finally, we look at the genes in the gene set LI.M127 to determine if they differ in expression between SARS-CoV-2 and no illness.
+
+```{r}
+mm <- getModuleMembers("LI.M127")[[1]]
+sel <- res_SC2[ res_SC2$SYMBOL %in% mm, ][["PrimaryID"]]
+plots <- lapply(sel[1:4], plot_gene, expr=norm_counts, covariate=covar$group)
+plot_grid(plotlist=plots, ncol=2)
+```
+
+As we can see, these genes are upregulated in SARS-CoV-2 as compared to no disease.
+
+## Eigengene
+
+Instead of examining each gene in a gene set one by one, we may compute the gene set's eigengene (first PCA component) and examine its distribution:
+
+```{r}
+eig <- eigengene(norm_counts, annot$SYMBOL)
+df <- data.frame(covar, eigengene=eig[ "LI.M127", ])
+ggplot(df, aes(x=group, y=eigengene)) + 
+  geom_boxplot() +
+  geom_jitter(width=.3)
+```
+
+## Upset plot
+
+Now we might wish to see how many genes are common amongst the gene sets that were discovered to be related with CERNO. The number of genes represented in the plot is shared by sets connected by vertical lines.
+
+```{r, fig.height = 11, fig.width = 9, message=FALSE, warning=FALSE}
+upset(ce_res_SC2$ID[1:20])
+```
+
+# Show package versions
+
+This is to provide the information about packages versions that were used for computations. With that we can make all experiments 100% reproduciable
+
+```{r}
+sessionInfo()
+```
